@@ -31,7 +31,7 @@ func createWavFile(method string, length int) {
 		}
 	}
 
-	f, err := os.Create(".brr-test.wav")
+	f, err := os.Create(".testfile_brr-test.wav")
 	if err != nil {
 		panic(err)
 	}
@@ -106,23 +106,23 @@ func runEncodeTest(t *testing.T, method string, length int, loop int, loopEnable
 	println("testing", method, "with length", length, "and loop", loop)
 	createWavFile(method, length)
 	codec := NewBrrCodec()
-	codec.readWavFile(".brr-test.wav")
-	codec.loop_start = uint32(loop)
-	codec.loop_enabled = loopEnabled
-	codec.encode()
-	f, err := os.Create(".brr-test.brr")
+	codec.ReadWavFile(".testfile_brr-test.wav")
+	codec.loopStart = loop
+	codec.loopEnabled = loopEnabled
+	codec.Encode()
+	f, err := os.Create(".testfile_brr-test.brr")
 	assert.NoError(t, err)
 	defer f.Close()
-	codec.writeBrr(f)
+	codec.WriteBrr(f)
 	f.Close()
 
-	args := []string{"../test/snesbrr.exe", "--encode", ".brr-test.wav", ".brr-test2.brr"}
+	args := []string{"../test/snesbrr.exe", "--encode", ".testfile_brr-test.wav", ".testfile_brr-test2.brr"}
 	if loopEnabled {
 		args = append(args, "--loop-start", strconv.Itoa(loop))
 	}
 	runCmd(t, args...)
 
-	compareChunks(t, ".brr-test.brr", ".brr-test2.brr")
+	compareChunks(t, ".testfile_brr-test.brr", ".testfile_brr-test2.brr")
 }
 
 // Tests against the original snesbrr.exe
@@ -186,7 +186,7 @@ func TestBrrLoops(t *testing.T) {
 }
 
 func createBrrFile(length int, crazy bool) {
-	f, err := os.Create(".brr-test.brr")
+	f, err := os.Create(".testfile_brr-test.brr")
 	if err != nil {
 		panic(err)
 	}
@@ -234,16 +234,16 @@ func runDecodeTest(t *testing.T, length int, crazy bool, gauss bool, pitch uint1
 	println("testing decode with length", length, "and crazy", crazy)
 	createBrrFile(length, crazy)
 	codec := NewBrrCodec()
-	codec.readBrrFile(".brr-test.brr")
-	codec.gauss_enabled = gauss
+	codec.ReadBrrFile(".testfile_brr-test.brr")
+	codec.gaussEnabled = gauss
 	if pitch > 0 {
-		codec.user_pitch_enabled = true
-		codec.pitch_step_base = pitch
+		codec.userPitchEnabled = true
+		codec.pitchStepBase = pitch
 	}
 
-	codec.decode()
+	codec.Decode()
 
-	args := []string{"../test/snesbrr.exe", "--decode", ".brr-test.brr", ".brr-test2.wav"}
+	args := []string{"../test/snesbrr.exe", "--decode", ".testfile_brr-test.brr", ".testfile_brr-test2.wav"}
 	if gauss {
 		args = append(args, "--enable-gauss")
 	}
@@ -251,9 +251,9 @@ func runDecodeTest(t *testing.T, length int, crazy bool, gauss bool, pitch uint1
 		args = append(args, "--pitch", fmt.Sprintf("%x", pitch))
 	}
 	runCmd(t, args...)
-	expected := readPcm16(".brr-test2.wav")
+	expected := readPcm16(".testfile_brr-test2.wav")
 
-	assert.Equal(t, expected, codec.wav_data)
+	assert.Equal(t, expected, codec.wavData)
 }
 
 func TestDecode(t *testing.T) {
@@ -285,10 +285,10 @@ func TestMain(m *testing.M) {
 	exitCode := m.Run() // Run all tests
 
 	// Teardown code here (runs after all tests)
-	os.Remove(".brr-test.wav")
-	os.Remove(".brr-test.brr")
-	os.Remove(".brr-test2.brr")
-	os.Remove(".brr-test2.wav")
+	os.Remove(".testfile_brr-test.wav")
+	os.Remove(".testfile_brr-test.brr")
+	os.Remove(".testfile_brr-test2.brr")
+	os.Remove(".testfile_brr-test2.wav")
 
 	os.Exit(exitCode)
 }

@@ -5,11 +5,16 @@
 package brr
 
 import (
+	"errors"
 	"io"
 	"os"
 
+	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
 )
+
+var ErrInvalidWav = errors.New("invalid wav file")
+var ErrUnsupportedWav = errors.New("unsupported wav file")
 
 var kGaussTable = []int16{
 	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
@@ -78,58 +83,100 @@ var kGaussTable = []int16{
 	0x517, 0x518, 0x518, 0x518, 0x518, 0x518, 0x519, 0x519,
 }
 
+type ProgressCallback func(*brrCodec)
+
 type brrCodec struct {
-	loop_start         uint32
-	loop_enabled       bool
-	gauss_enabled      bool
-	user_pitch_enabled bool
-	pitch_step_base    uint16
-	input_sample_rate  uint32
-	output_sample_rate uint32
-	wav_data           []int16
-	brr_data           []uint8
-	cb_func            func(*brrCodec)
-	cur_progress       uint
-	last_progress      uint
-	cb_progress        uint
-	total_blocks       uint32
-	total_error        float64
-	avg_error          float64
-	min_error          float64
-	max_error          float64
+	loopStart        int
+	loopEnabled      bool
+	gaussEnabled     bool
+	userPitchEnabled bool
+	pitchStepBase    uint16
+	InputSampleRate  uint32
+	OutputSampleRate uint32
+	wavData          []int16
+	brrData          []uint8
+	callbackFunc     ProgressCallback
+	curProgress      uint
+	lastProgress     uint
+	totalBlocks      int
+
+	totalError float64
+	avgError   float64
+	minError   float64
+	maxError   float64
 }
 
 func NewBrrCodec() *brrCodec {
 	codec := brrCodec{}
-	codec.reset()
+	codec.initialize()
 	return &codec
 }
 
-func (bc *brrCodec) reset_progress() {
-	bc.cur_progress = 0
-	bc.last_progress = 0
-	bc.cb_progress = 0
-	if bc.cb_func != nil {
-		bc.cb_func(bc)
+func (bc *brrCodec) SetGaussEnabled(gaussEnabled bool) {
+	bc.gaussEnabled = gaussEnabled
+}
+
+func (bc *brrCodec) SetLoop(loopStart int) {
+	bc.loopStart = loopStart
+	bc.loopEnabled = true
+}
+
+func (bc *brrCodec) GetErrorRate() (totalError float64, avgError float64, minError float64, maxError float64) {
+	return bc.totalError, bc.avgError, bc.minError, bc.maxError
+}
+
+func (bc *brrCodec) GetTotalBlocks() int {
+	return bc.totalBlocks
+}
+
+func (bc *brrCodec) GetWavData() []int16 {
+	return bc.wavData
+}
+
+func (bc *brrCodec) GetBrrData() []uint8 {
+	return bc.brrData
+}
+
+func (bc *brrCodec) SetCallbackFunc(f ProgressCallback) {
+	bc.callbackFunc = f
+}
+
+func (bc *brrCodec) GetProgress() int {
+	return int(bc.curProgress)
+}
+
+func (bc *brrCodec) SetPitch(pitch int) {
+	bc.pitchStepBase = uint16(pitch)
+	bc.userPitchEnabled = true
+}
+
+func (bc *brrCodec) GetPitch() (int, bool) {
+	return int(bc.pitchStepBase), bc.userPitchEnabled
+}
+
+func (bc *brrCodec) resetProgress() {
+	bc.curProgress = 0
+	bc.lastProgress = 0
+	if bc.callbackFunc != nil {
+		bc.callbackFunc(bc)
 	}
 }
 
-func (bc *brrCodec) set_progress(n uint) {
-	if bc.cb_func != nil {
-		bc.cur_progress = n
-		if bc.cur_progress != bc.last_progress {
-			bc.cb_func(bc)
-			bc.last_progress = bc.cur_progress
+func (bc *brrCodec) setProgress(n uint) {
+	if bc.callbackFunc != nil {
+		bc.curProgress = n
+		if bc.curProgress != bc.lastProgress {
+			bc.callbackFunc(bc)
+			bc.lastProgress = bc.curProgress
 		}
 	}
 }
 
-func (bc *brrCodec) reset() {
-	*bc = brrCodec{} // Rather than initializing everything, use zero initialization and only set what's needed.
-	bc.pitch_step_base = 0x1000
-
-	bc.input_sample_rate = 32000
-	bc.output_sample_rate = 32000
+func (bc *brrCodec) initialize() {
+	*bc = brrCodec{}
+	bc.pitchStepBase = 0x1000
+	bc.InputSampleRate = 32000
+	bc.OutputSampleRate = 32000
 }
 
 func clamp[T int8 | int16 | int32 | int64](value T, bits int) T {
@@ -145,26 +192,26 @@ func clamp[T int8 | int16 | int32 | int64](value T, bits int) T {
 	return value
 }
 
-func (bc *brrCodec) decode() {
+func (bc *brrCodec) Decode() {
 
-	if !bc.gauss_enabled {
+	if !bc.gaussEnabled {
 		// 7.8125 = 32000 / 0x1000
-		bc.output_sample_rate = uint32(float64(bc.pitch_step_base)*7.8125 + 0.5)
+		bc.OutputSampleRate = uint32(float64(bc.pitchStepBase)*7.8125 + 0.5)
 	}
 
-	bc.wav_data = []int16{}
+	bc.wavData = []int16{}
 
-	if len(bc.brr_data) == 0 {
+	if len(bc.brrData) == 0 {
 		return
 	}
 
 	// If the length of the data isn't a multiple of 9 (9 bytes per block), pad it with
 	// zero bytes.
-	for len(bc.brr_data)%9 != 0 {
-		bc.brr_data = append(bc.brr_data, 0)
+	for len(bc.brrData)%9 != 0 {
+		bc.brrData = append(bc.brrData, 0)
 	}
 	// Make sure that the last block has the "END" flag set.
-	bc.brr_data[len(bc.brr_data)-9] |= 1
+	bc.brrData[len(bc.brrData)-9] |= 1
 
 	data := 0
 	sample := [8]int16{} // 4 samples stored twice
@@ -187,7 +234,7 @@ func (bc *brrCodec) decode() {
 					return
 				}
 
-				header = bc.brr_data[data]
+				header = bc.brrData[data]
 				data++
 				brr_counter = 16
 
@@ -200,7 +247,7 @@ func (bc *brrCodec) decode() {
 			var brange uint8 = header >> 4
 			var filter uint8 = (header >> 2) & 3
 
-			var samp uint8 = bc.brr_data[data]
+			var samp uint8 = bc.brrData[data]
 			var s int32
 
 			// the high nybble is decoded before the low nybble
@@ -253,7 +300,7 @@ func (bc *brrCodec) decode() {
 		var samp []int16 = sample[samp_i : samp_i+4]
 		var s int32
 
-		if bc.gauss_enabled {
+		if bc.gaussEnabled {
 			var p int32 = pitch >> 4
 			var np int32 = -p
 			var G4 int16 = kGaussTable[-1+np]
@@ -275,14 +322,14 @@ func (bc *brrCodec) decode() {
 			s = (s * 0x07FF) >> 11 // envx
 			s = (s * 0x7F) >> 7    // volume
 
-			pitch += int32(bc.pitch_step_base)
+			pitch += int32(bc.pitchStepBase)
 		} else {
 			s = int32(samp[3])
 			pitch += 0x1000
 		}
 
 		s <<= 1
-		bc.wav_data = append(bc.wav_data, int16(s))
+		bc.wavData = append(bc.wavData, int16(s))
 	}
 }
 
@@ -321,19 +368,20 @@ func testOverflow(ls []int16) uint8 {
 	return r
 }
 
-func (bc *brrCodec) encode() {
-	bc.reset_progress()
-	bc.brr_data = []uint8{}
+// ---------------------------------------------------------------------------------------
+func (bc *brrCodec) Encode() {
+	bc.resetProgress()
+	bc.brrData = []uint8{}
 
-	if bc.loop_start >= uint32(len(bc.wav_data)) {
-		bc.loop_start = 0
-		bc.loop_enabled = false
+	if bc.loopStart >= len(bc.wavData) || bc.loopStart < 0 {
+		bc.loopStart = 0
+		bc.loopEnabled = false
 	}
 
-	if bc.loop_enabled {
-		var start_align uint32 = uint32(16-(bc.loop_start&15)) & 15
-		var loop_size uint32 = uint32(len(bc.wav_data) - int(bc.loop_start))
-		var end_align uint32 = loop_size
+	if bc.loopEnabled {
+		start_align := (16 - (bc.loopStart & 15)) & 15
+		loop_size := len(bc.wavData) - bc.loopStart
+		end_align := loop_size
 
 		for (end_align & 15) != 0 {
 			end_align <<= 1
@@ -349,44 +397,44 @@ func (bc *brrCodec) encode() {
 			// TODO: make sure that loop_start + loop_size is the end of wav_data
 			//wav_data.resize(wav_data.size() + end_align, 0);
 
-			var src = bc.loop_start
-			var dst = bc.loop_start + loop_size
-			var end = bc.loop_start + uint32(loop_size) + end_align
+			var src = bc.loopStart
+			var dst = bc.loopStart + loop_size
+			var end = bc.loopStart + loop_size + end_align
 
 			for dst != end {
-				bc.wav_data = append(bc.wav_data, bc.wav_data[src])
+				bc.wavData = append(bc.wavData, bc.wavData[src])
 				//wav_data[dst] = wav_data[src];
 				dst++
 				src++
 			}
 
 			// 16-sample align loop_start
-			bc.loop_start += start_align
+			bc.loopStart += start_align
 		}
 	} else {
-		for (len(bc.wav_data) & 15) != 0 {
-			bc.wav_data = append(bc.wav_data, 0)
+		for (len(bc.wavData) & 15) != 0 {
+			bc.wavData = append(bc.wavData, 0)
 		}
 	}
 
 	const base_adjust_rate float64 = 0.0004
 	var adjust_rate float64 = base_adjust_rate
-	var loop_block uint32 = bc.loop_start / 16
-	var wimax uint32 = uint32(len(bc.wav_data) / 16)
-	var wi uint32 = 0
+	var loop_block int = bc.loopStart / 16
+	var wimax int = len(bc.wavData) / 16
+	var wi int = 0
 	var best_samp [18]int16
 
 	//best_samp[0] = 0; already inited
 	//best_samp[1] = 0;
 
-	bc.total_blocks = wimax
-	bc.total_error = 0
-	bc.avg_error = 0
-	bc.min_error = 1e20
-	bc.max_error = 0
+	bc.totalBlocks = wimax
+	bc.totalError = 0
+	bc.avgError = 0
+	bc.minError = 1e20
+	bc.maxError = 0
 
 	for wi != wimax {
-		var p = bc.wav_data[wi*16:]
+		var p = bc.wavData[wi*16:]
 		var best_err float64 = 1e20
 		var blk_samp [18]int16
 		var best_data [9]uint8
@@ -414,27 +462,31 @@ func (bc *brrCodec) encode() {
 					//int16* blk_ls = blk_samp + n;
 					var filter_s int32
 
+					a, b := int32(blk_samp[n+1]), int32(blk_samp[n+0])
 					switch filter {
 					case 0:
+						// Coefficients: 0, 0
 						filter_s = 0
 
 					case 1:
-						filter_s = int32(blk_samp[n+1])        // add 16/16
-						filter_s += int32(-blk_samp[n+1]) >> 4 // add (-1)/16
+						// Coefficients: 15/16, 0
+						filter_s = a + ((-a) >> 4)
 
 					case 2:
-						filter_s = int32(blk_samp[n+1]) << 1                                   // add 64/32
-						filter_s += -(int32(blk_samp[n+1]) + (int32(blk_samp[n+1]) << 1)) >> 5 // add (-3)/32
-						filter_s += -int32(blk_samp[n+0])                                      // add (-16)/16
-						filter_s += int32(blk_samp[n+0]) >> 4                                  // add 1/16
+						// Coefficients: 61/32, -15/16
+						filter_s = a << 1                // add 64/32
+						filter_s += -(a + (a << 1)) >> 5 // add (-3)/32
+						filter_s += -b                   // add (-16)/16
+						filter_s += b >> 4               // add 1/16
 
 					case 3:
-						filter_s = int32(blk_samp[n+1]) << 1                                                                 // add 128/64
-						filter_s += -(int32(blk_samp[n+1]) + (int32(blk_samp[n+1]) << 2) + (int32(blk_samp[n+1]) << 3)) >> 6 // add (-13)/64
-						filter_s += -int32(blk_samp[n+0])                                                                    // add (-16)/16
-						filter_s += (int32(blk_samp[n+0]) + (int32(blk_samp[n+0]) << 1)) >> 4                                // add 3/16
-					default:
-						panic("unknown filter value")
+						filter_s = a << 1                           // add 128/64
+						filter_s += -(a + (a << 2) + (a << 3)) >> 6 // add (-13)/64
+						filter_s += -b                              // add (-16)/16
+						filter_s += (b + (b << 1)) >> 4             // add 3/16
+
+					default: // should never happen
+						filter_s = 0
 					}
 
 					// undo 15 -> 16 bit conversion
@@ -502,7 +554,7 @@ func (bc *brrCodec) encode() {
 						blk_samp[n+2] = int16(s2)
 						blk_data[n] = rs2
 					}
-				} // block loop
+				}
 
 				// Use < for comparison. This will cause the encoder to prefer
 				// less complex filters and higher ranges when error rates are equal.
@@ -519,8 +571,8 @@ func (bc *brrCodec) encode() {
 						best_data[n+1] = (blk_data[n*2] << 4) | blk_data[n*2+1]
 					}
 				}
-			} // range loop
-		} // filter loop
+			}
+		}
 
 		var overflow uint16 = 0
 
@@ -564,41 +616,41 @@ func (bc *brrCodec) encode() {
 			best_samp[0] = best_samp[16]
 			best_samp[1] = best_samp[17]
 
-			bc.total_error += best_err
+			bc.totalError += best_err
 
-			if best_err < bc.min_error {
-				bc.min_error = best_err
+			if best_err < bc.minError {
+				bc.minError = best_err
 			}
-			if best_err > bc.max_error {
-				bc.max_error = best_err
+			if best_err > bc.maxError {
+				bc.maxError = best_err
 			}
-			bc.brr_data = append(bc.brr_data, best_data[:]...)
+			bc.brrData = append(bc.brrData, best_data[:]...)
 
 			wi += 1
-			bc.set_progress(uint(wi * 100 / wimax))
+			bc.setProgress(uint(wi * 100 / wimax))
 		}
-	} // wave loop
+	}
 
 	if wimax == 0 {
-		bc.min_error = 0
+		bc.minError = 0
 	} else {
-		bc.avg_error = bc.total_error / float64(wimax)
+		bc.avgError = bc.totalError / float64(wimax)
 	}
-	if len(bc.brr_data) == 0 || !bc.loop_enabled {
-		bc.brr_data = append(bc.brr_data, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	if len(bc.brrData) == 0 || !bc.loopEnabled {
+		bc.brrData = append(bc.brrData, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 	}
 
 	var last_header_set_bits uint8 = 1
-	if bc.loop_enabled {
+	if bc.loopEnabled {
 		last_header_set_bits |= 2
 	}
-	bc.brr_data[len(bc.brr_data)-9] |= last_header_set_bits
+	bc.brrData[len(bc.brrData)-9] |= last_header_set_bits
 
-	bc.set_progress(100)
+	bc.setProgress(100)
 
-	if !bc.user_pitch_enabled {
+	if !bc.userPitchEnabled {
 		// 0.128 = 0x1000 / 32000
-		var x uint32 = uint32(float64(bc.input_sample_rate)*0.128 + 0.5)
+		var x uint32 = uint32(float64(bc.InputSampleRate)*0.128 + 0.5)
 
 		if x < 1 {
 			x = 1
@@ -606,90 +658,141 @@ func (bc *brrCodec) encode() {
 			x = 0x3FFF
 		}
 
-		bc.pitch_step_base = uint16(x)
+		bc.pitchStepBase = uint16(x)
 	}
 }
 
-// void FASTCALL BrrCodec::read_brr (Stream& is)
-// {
-// 	brr_data.resize(((is.size() + 8) / 9) * 9, 0);
-// 	is.read(&brr_data[0], is.size());
-// }
-
-// func (bc *BrrCodec) readBrr(is io.Reader) error {
-// 	bc.brr_data = make([]uint8, ((is.Size()+8)/9)*9)
-// 	_, err := is.Read(bc.brr_data[:is.Size()])
-// 	return err
-// }
-
-func (bc *brrCodec) readBrr(is io.Reader) {
+// ---------------------------------------------------------------------------------------
+// Load the codec with the given BRR data from a stream.
+func (bc *brrCodec) ReadBrr(is io.Reader) error {
 	var err error
-	bc.brr_data, err = io.ReadAll(is)
+	bc.brrData, err = io.ReadAll(is)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	for (len(bc.brr_data) % 9) != 0 {
-		bc.brr_data = append(bc.brr_data, 0)
+
+	// Pad to a multiple of 9 (BRR chunk size).
+	for (len(bc.brrData) % 9) != 0 {
+		bc.brrData = append(bc.brrData, 0)
 	}
+
+	return nil
 }
 
-func (bc *brrCodec) readBrrFile(filename string) {
+// ---------------------------------------------------------------------------------------
+// Load the codec with the given BRR data from a file.
+func (bc *brrCodec) ReadBrrFile(filename string) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer file.Close()
-	bc.readBrr(file)
+	return bc.ReadBrr(file)
 }
 
-func (bc *brrCodec) writeBrr(os io.Writer) {
-	_, err := os.Write(bc.brr_data)
+// ---------------------------------------------------------------------------------------
+// Write the encoded data into the given stream.
+func (bc *brrCodec) WriteBrr(os io.Writer) error {
+	_, err := os.Write(bc.brrData)
 	if err != nil {
-		panic(err)
+		return err
 	}
+	return nil
 }
 
-// Load a wav file into the codec.
-func (bc *brrCodec) readWav(file io.ReadSeeker) {
+// ---------------------------------------------------------------------------------------
+// Write the encoded data into the given stream.
+func (bc *brrCodec) WriteBrrFile(filename string) error {
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	return bc.WriteBrr(f)
+}
+
+// ---------------------------------------------------------------------------------------
+// Read the given wav file from a stream into the codec buffer.
+func (bc *brrCodec) ReadWav(file io.ReadSeeker) error {
 	decoder := wav.NewDecoder(file)
 	if !decoder.IsValidFile() {
-		panic("invalid wav file")
+		return ErrInvalidWav
 	}
 
 	data, err := decoder.FullPCMBuffer()
 	if err != nil {
-		println("couldn't read wav file")
-		panic(err)
+		return err
 	}
 
 	intData := data.AsIntBuffer()
 
 	if intData.SourceBitDepth == 8 {
 		for i := 0; i < len(intData.Data); i += intData.Format.NumChannels {
-			bc.wav_data = append(bc.wav_data, int16(intData.Data[i])<<8)
+			bc.wavData = append(bc.wavData, int16(intData.Data[i])<<8)
 		}
 	} else if intData.SourceBitDepth == 16 {
 		for i := 0; i < len(intData.Data); i += intData.Format.NumChannels {
-			bc.wav_data = append(bc.wav_data, int16(intData.Data[i]))
+			bc.wavData = append(bc.wavData, int16(intData.Data[i]))
 		}
 	} else if intData.SourceBitDepth == 24 {
 		for i := 0; i < len(intData.Data); i += intData.Format.NumChannels {
-			bc.wav_data = append(bc.wav_data, int16(intData.Data[i]>>8))
+			bc.wavData = append(bc.wavData, int16(intData.Data[i]>>8))
 		}
 	} else if intData.SourceBitDepth == 32 {
 		for i := 0; i < len(intData.Data); i += intData.Format.NumChannels {
-			bc.wav_data = append(bc.wav_data, int16(intData.Data[i]>>16))
+			bc.wavData = append(bc.wavData, int16(intData.Data[i]>>16))
 		}
 	} else {
-		panic("unsupported wav bit depth")
+		return ErrUnsupportedWav
 	}
+
+	return nil
 }
 
-func (bc *brrCodec) readWavFile(filename string) {
+// ---------------------------------------------------------------------------------------
+// Read the given wav file into the codec buffer.
+func (bc *brrCodec) ReadWavFile(filename string) error {
+	// TODO: multichannel wavs need to be mixed into one channel.
+
 	file, err := os.Open(filename)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer file.Close()
-	bc.readWav(file)
+	return bc.ReadWav(file)
+}
+
+// ---------------------------------------------------------------------------------------
+// Write the contents of the decoded buffer to the given stream.
+func (bc *brrCodec) WriteWav(os io.WriteSeeker) error {
+	enc := wav.NewEncoder(os, int(bc.OutputSampleRate), 16, 1, 1)
+	defer enc.Close()
+
+	outputData := make([]int, len(bc.wavData))
+	for i := 0; i < len(bc.wavData); i++ {
+		outputData[i] = int(bc.wavData[i])
+	}
+
+	err := enc.Write(&audio.IntBuffer{
+		Data: outputData,
+		Format: &audio.Format{
+			SampleRate: int(bc.OutputSampleRate), NumChannels: 1,
+		},
+		SourceBitDepth: 16,
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------------------
+// Write the contents of the decoded buffer to the given file.
+func (bc *brrCodec) WriteWavFile(filename string) error {
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return bc.WriteWav(f)
 }
