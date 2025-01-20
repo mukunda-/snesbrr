@@ -230,7 +230,7 @@ func readPcm16(filename string) []int16 {
 	return buffer
 }
 
-func runDecodeTest(t *testing.T, length int, crazy bool, gauss bool, pitch uint16) {
+func runDecodeTest(t *testing.T, length int, crazy bool, gauss bool, pitch int) {
 	println("testing decode with length", length, "and crazy", crazy)
 	createBrrFile(length, crazy)
 	codec := NewBrrCodec()
@@ -264,6 +264,7 @@ func TestDecode(t *testing.T) {
 	runDecodeTest(t, 9*50+3, true, false, 0)
 	runDecodeTest(t, 9*50+4, true, false, 0)
 
+	runDecodeTest(t, 9*3, false, true, 3) //
 	runDecodeTest(t, 9*3, false, true, 0)
 	runDecodeTest(t, 9*500, true, true, 0)
 	runDecodeTest(t, 9*50+1, false, true, 0)

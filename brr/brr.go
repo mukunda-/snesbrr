@@ -90,14 +90,14 @@ type brrCodec struct {
 	loopEnabled      bool
 	gaussEnabled     bool
 	userPitchEnabled bool
-	pitchStepBase    uint16
-	InputSampleRate  uint32
-	OutputSampleRate uint32
+	pitchStepBase    int
+	InputSampleRate  int
+	OutputSampleRate int
 	wavData          []int16
 	brrData          []uint8
 	callbackFunc     ProgressCallback
-	curProgress      uint
-	lastProgress     uint
+	curProgress      int
+	lastProgress     int
 	totalBlocks      int
 
 	totalError float64
@@ -146,12 +146,12 @@ func (bc *brrCodec) GetProgress() int {
 }
 
 func (bc *brrCodec) SetPitch(pitch int) {
-	bc.pitchStepBase = uint16(pitch)
+	bc.pitchStepBase = pitch
 	bc.userPitchEnabled = true
 }
 
 func (bc *brrCodec) GetPitch() (int, bool) {
-	return int(bc.pitchStepBase), bc.userPitchEnabled
+	return bc.pitchStepBase, bc.userPitchEnabled
 }
 
 func (bc *brrCodec) resetProgress() {
@@ -162,7 +162,7 @@ func (bc *brrCodec) resetProgress() {
 	}
 }
 
-func (bc *brrCodec) setProgress(n uint) {
+func (bc *brrCodec) setProgress(n int) {
 	if bc.callbackFunc != nil {
 		bc.curProgress = n
 		if bc.curProgress != bc.lastProgress {
@@ -179,7 +179,7 @@ func (bc *brrCodec) initialize() {
 	bc.OutputSampleRate = 32000
 }
 
-func clamp[T int8 | int16 | int32 | int64](value T, bits int) T {
+func clamp[T int8 | int16 | int32 | int64 | int](value T, bits int) T {
 	var low T = -1 << (bits - 1)
 	var high T = (1 << (bits - 1)) - 1
 
@@ -196,7 +196,7 @@ func (bc *brrCodec) Decode() {
 
 	if !bc.gaussEnabled {
 		// 7.8125 = 32000 / 0x1000
-		bc.OutputSampleRate = uint32(float64(bc.pitchStepBase)*7.8125 + 0.5)
+		bc.OutputSampleRate = int(float64(bc.pitchStepBase)*7.8125 + 0.5)
 	}
 
 	bc.wavData = []int16{}
@@ -217,9 +217,9 @@ func (bc *brrCodec) Decode() {
 	sample := [8]int16{} // 4 samples stored twice
 	last_sample := [2]int16{}
 	var header uint8
-	var samp_i uint
-	var brr_counter uint = 1 // --1 == 0
-	var pitch int32 = 0x3000 // decode 4 samples
+	var samp_i int
+	brr_counter := 1 // minus 1 = 0 to trigger next block decoding
+	pitch := 0x3000  // decode 4 samples
 
 	for {
 		for pitch >= 0 {
@@ -244,18 +244,18 @@ func (bc *brrCodec) Decode() {
 				}
 			}
 
-			var brange uint8 = header >> 4
-			var filter uint8 = (header >> 2) & 3
+			brange := header >> 4
+			filter := (header >> 2) & 3
 
-			var samp uint8 = bc.brrData[data]
-			var s int32
+			var samplePair uint8 = bc.brrData[data]
+			var s int
 
 			// the high nybble is decoded before the low nybble
 			if (brr_counter & 1) == 1 {
 				data++
-				s = int32((samp&0x0F)^8) - 8
+				s = int((samplePair&0x0F)^8) - 8
 			} else {
-				s = int32((samp>>4)^8) - 8
+				s = int((samplePair>>4)^8) - 8
 			}
 
 			if brange > 12 {
@@ -269,26 +269,26 @@ func (bc *brrCodec) Decode() {
 			switch filter {
 			// last[1] * 15 / 16
 			case 1:
-				s += int32(last_sample[1])       // add 16/16
-				s += -int32(last_sample[1]) >> 4 // add (-1)/16
+				s += int(last_sample[1])       // add 16/16
+				s += -int(last_sample[1]) >> 4 // add (-1)/16
 				// don't clamp - result does not overflow 16 bits
 			case 2:
 				// last[1] * 61 / 32 - last[0] * 15 / 16
-				s += int32(last_sample[1]) << 1                                   // add 64/32
-				s += -(int32(last_sample[1]) + (int32(last_sample[1]) << 1)) >> 5 // add (-3)/32
-				s += -int32(last_sample[0])                                       // add (-16)/16
-				s += int32(last_sample[0]) >> 4                                   // add 1/16
+				s += int(last_sample[1]) << 1                                 // add 64/32
+				s += -(int(last_sample[1]) + (int(last_sample[1]) << 1)) >> 5 // add (-3)/32
+				s += -int(last_sample[0])                                     // add (-16)/16
+				s += int(last_sample[0]) >> 4                                 // add 1/16
 				s = clamp(s, 16)
 			case 3:
 				// last[1] * 115 / 64 - last[0] * 13 / 16
-				s += int32(last_sample[1]) << 1                                                                  // add 128/64
-				s += -(int32(last_sample[1]) + (int32(last_sample[1]) << 2) + (int32(last_sample[1]) << 3)) >> 6 // add (-13)/64
-				s += -int32(last_sample[0])                                                                      // add (-16)/16
-				s += (int32(last_sample[0]) + (int32(last_sample[0]) << 1)) >> 4                                 // add 3/16
+				s += int(last_sample[1]) << 1                                                              // add 128/64
+				s += -(int(last_sample[1]) + (int(last_sample[1]) << 2) + (int(last_sample[1]) << 3)) >> 6 // add (-13)/64
+				s += -int(last_sample[0])                                                                  // add (-16)/16
+				s += (int(last_sample[0]) + (int(last_sample[0]) << 1)) >> 4                               // add 3/16
 				s = clamp(s, 16)
 			}
 
-			s = int32(int16(s<<1) >> 1) // wrap to 15 bits, sign-extend to 16 bits
+			s = int(int16(s<<1) >> 1) // wrap to 15 bits, sign-extend to 16 bits
 			last_sample[0] = last_sample[1]
 			last_sample[1] = int16(s) // 15-bit
 
@@ -298,33 +298,33 @@ func (bc *brrCodec) Decode() {
 		} // pitch loop
 
 		var samp []int16 = sample[samp_i : samp_i+4]
-		var s int32
+		var s int
 
 		if bc.gaussEnabled {
-			var p int32 = pitch >> 4
-			var np int32 = -p
-			var G4 int16 = kGaussTable[-1+np]
-			var G3 int16 = kGaussTable[255+np]
-			var G2 int16 = kGaussTable[512+p]
-			var G1 int16 = kGaussTable[256+p]
+			p := pitch >> 4
+			np := -p
+			G4 := int(kGaussTable[-1+np])
+			G3 := int(kGaussTable[255+np])
+			G2 := int(kGaussTable[512+p])
+			G1 := int(kGaussTable[256+p])
 
 			// p is always < 0 and >= -256
 			// the first 3 steps wrap using a 15-bit accumulator
 			// the last step accumulates to 16-bits then saturates to 15-bits
 
-			s = (int32(G4) * int32(samp[3])) >> 11
-			s += (int32(G3) * int32(samp[2])) >> 11
-			s += (int32(G2) * int32(samp[1])) >> 11
-			s = int32(int16(s<<1) >> 1)
-			s += int32(G1) * int32(samp[0]) >> 11
+			s = ((G4) * int(samp[3])) >> 11
+			s += ((G3) * int(samp[2])) >> 11
+			s += ((G2) * int(samp[1])) >> 11
+			s = int(int16(s<<1) >> 1)
+			s += (G1) * int(samp[0]) >> 11
 			s = clamp(s, 15)
 
 			s = (s * 0x07FF) >> 11 // envx
 			s = (s * 0x7F) >> 7    // volume
 
-			pitch += int32(bc.pitchStepBase)
+			pitch += bc.pitchStepBase
 		} else {
-			s = int32(samp[3])
+			s = int(samp[3])
 			pitch += 0x1000
 		}
 
@@ -333,11 +333,10 @@ func (bc *brrCodec) Decode() {
 	}
 }
 
-func testGauss(G4, G3, G2 int16, ls []int16) uint8 {
-	var s int32
-	s = (int32(G4) * int32(ls[0])) >> 11
-	s += (int32(G3) * int32(ls[1])) >> 11
-	s += (int32(G2) * int32(ls[2])) >> 11
+func testGauss(G4, G3, G2 int, ls []int16) uint8 {
+	s := (G4 * int(ls[0])) >> 11
+	s += (G3 * int(ls[1])) >> 11
+	s += (G2 * int(ls[2])) >> 11
 	if s > 0x3FFF || s < -0x4000 {
 		return 1
 	}
@@ -627,7 +626,7 @@ func (bc *brrCodec) Encode() {
 			bc.brrData = append(bc.brrData, best_data[:]...)
 
 			wi += 1
-			bc.setProgress(uint(wi * 100 / wimax))
+			bc.setProgress(wi * 100 / wimax)
 		}
 	}
 
@@ -650,7 +649,7 @@ func (bc *brrCodec) Encode() {
 
 	if !bc.userPitchEnabled {
 		// 0.128 = 0x1000 / 32000
-		var x uint32 = uint32(float64(bc.InputSampleRate)*0.128 + 0.5)
+		x := int(float64(bc.InputSampleRate)*0.128 + 0.5)
 
 		if x < 1 {
 			x = 1
@@ -658,7 +657,7 @@ func (bc *brrCodec) Encode() {
 			x = 0x3FFF
 		}
 
-		bc.pitchStepBase = uint16(x)
+		bc.pitchStepBase = x
 	}
 }
 
