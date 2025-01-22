@@ -1,3 +1,16 @@
+// snesbrr
+// Copyright 2025 Mukunda Johnson (mukunda.com)
+// Licensed under MIT
+
+/*
+A Bit-Rate-Reduction (BRR) codec for the SNES S-DSP.
+
+Basic usage:
+
+	snesbrr --help
+	snesbrr --encode input.wav output.brr
+	snesbrr --decode output.brr input-transcoded.wav
+*/
 package main
 
 import (
@@ -10,7 +23,55 @@ import (
 	"go.mukunda.com/snesbrr/brr"
 )
 
-// ---------------------------------------------------------------------------------------
+type returnCode = int
+
+const kUsage = `
+Command Line Options
+--------------------
+-?, --help
+  Show this help.
+
+-e, --encode
+   Encoding mode. The input (WAV file) will be encoded to
+   BRR and saved to the output file in raw BRR format.
+
+-d, --decode
+   Decoding mode. The input (raw BRR file) will be decoded
+   and saved to the output file in WAV format.
+
+-l START, --loop START
+   Specify the starting sample index of the loop with the
+   decimal value START. If the loop start or loop length is
+   not divisible by 16 (BRR block size), then the loop will
+   be unrolled to align, increasing the output size. Looping
+   is disabled by default.
+
+--codec noc|dmv
+   Sets the codec implementation to "dmv" or "noc". Uses
+	"noc" by default, which is a newer implementation. "dmv"
+	is a direct port of snesbrr by DMV47 which may contain
+	some bugs.
+
+--opt OPT=VALUE
+   Set the codec option OPT to VALUE. See below. if =VALUE
+	is omitted, it is treated as "1".
+
+Codec Options
+-------------
+
+compat = 1 | 0 (default: 0)
+   For the dmv codec only. Setting it to "1" will emulate
+   the bugs in the original dmv codec.
+
+gauss = 1 | 0 (default: 0)
+   For the dmv codec only, setting it to "1" will apply a
+   gaussian filter, simulating how the SNES sounds.
+
+pitch = 0x0001-0x3FFF (default: 0x1000)
+   For the dmv codec only. This sets a pitch rate for the
+   output to the hexadecimal number. This interacts with the
+	gaussian filtering.`
+
 func printUsage(short bool) {
 	fmt.Println("Usage: [options] input-file output-file")
 	if short {
@@ -18,181 +79,171 @@ func printUsage(short bool) {
 		return
 	}
 
-	fmt.Println(`
-Options
--------
--?, --help
-	Print a summary of the command line options and exit.
-
--e, --encode
-	Encode WAV (input-file) to BRR (output-file).
-	Valid options: '--loop-start'.
-
--d, --decode
-	Decode BRR (input-file) to WAV (output-file).
-	Valid options: '--pitch', '--enable-gauss'.
-
--l START, --loop-start START
-	Set the loop start sample to the decimal value START. If this value
-	or the size of the loop is not a multiple of 16, the looped samples
-	will be repeated until both the start and end points are multiples
-	of 16. Looping is disabled by default.
-
--p PITCH, --pitch PITCH
-	Set the pitch rate to the value PITCH. This value is only used
-	during decoding. It must be between 0x0001 and 0x3FFF. The default 
-	value is 0x1000.
-
--g, --enable-gauss
-	Enable gaussian filtering during decoding. This setting can be
-	used to simulate the decoding process of an SNES in the output.`)
+	fmt.Println(kUsage)
 }
 
-var ErrBadPitch = errors.New("invalid pitch value")
+type codecOptions []string
+
+func (s *codecOptions) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *codecOptions) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
 
 type programArgs struct {
-	Help      bool
-	Encode    bool
-	LoopStart int
-	Pitch     int
-	Gauss     bool
+	InputFile  string
+	OutputFile string
+	Help       bool
+	Encode     bool
+	Decode     bool
+	Loop       int
+	Opts       codecOptions
+	Codec      string
 }
 
-// ---------------------------------------------------------------------------------------
-func parsePitch(pitch string) (int, error) {
-	var pitchValue int
-	var parsed int
-	var err error
-	if strings.HasPrefix(pitch, "0x") {
-		parsed, err = fmt.Sscanf(pitch, "%x", &pitchValue)
-		if parsed == 0 || err != nil {
-			return 0, ErrBadPitch
-		}
-	} else {
-		parsed, err = fmt.Sscanf(pitch, "%d", &pitchValue)
-	}
-	if parsed == 0 || err != nil {
-		return 0, ErrBadPitch
-	}
-	return pitchValue, nil
-}
+var ErrShowHelp = errors.New("show help")
+var ErrInvalidArgs = errors.New("invalid arguments")
 
-// ---------------------------------------------------------------------------------------
-func parseArgs() programArgs {
-
+func parseArgs(argSet []string) (programArgs, error) {
 	args := programArgs{}
 
-	flag.BoolVar(&args.Help, "help", false, "Display this help message")
-	flag.BoolVar(&args.Help, "?", false, "Display this help message")
+	flagSet := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
-	flag.BoolVar(&args.Encode, "encode", false, "Encode WAV -> BRR")
-	flag.BoolVar(&args.Encode, "e", false, "Encode WAV -> BRR")
+	flagSet.BoolVar(&args.Help, "help", false, "Display this help message")
+	flagSet.BoolVar(&args.Help, "?", false, "Display this help message")
 
-	var decode bool
-	flag.BoolVar(&decode, "decode", false, "Decode BRR -> WAV")
-	flag.BoolVar(&decode, "d", false, "Decode BRR -> WAV")
+	flagSet.BoolVar(&args.Encode, "encode", false, "Encode WAV -> BRR")
+	flagSet.BoolVar(&args.Encode, "e", false, "Encode WAV -> BRR")
 
-	flag.IntVar(&args.LoopStart, "loop-start", -1, "Set the loop start sample")
-	flag.IntVar(&args.LoopStart, "l", -1, "Set the loop start sample")
+	flagSet.BoolVar(&args.Decode, "decode", false, "Decode BRR -> WAV")
+	flagSet.BoolVar(&args.Decode, "d", false, "Decode BRR -> WAV")
 
-	var pitch string
-	flag.StringVar(&pitch, "pitch", "", "Set the pitch rate for decoding")
-	flag.StringVar(&pitch, "p", "", "Set the pitch rate for decoding")
+	flagSet.IntVar(&args.Loop, "loop", -1, "Set the loop start sample")
+	flagSet.IntVar(&args.Loop, "l", -1, "Set the loop start sample")
 
-	flag.BoolVar(&args.Gauss, "enable-gauss", false, "Enable gaussian filtering during decoding")
-	flag.BoolVar(&args.Gauss, "g", false, "Enable gaussian filtering during decoding")
+	flagSet.StringVar(&args.Codec, "codec", "", "Set the codec implementation")
 
-	flag.Parse()
+	flagSet.Var(&args.Opts, "opt", "Set codec options in the form OPT=VALUE")
 
-	if args.Help {
-		printUsage(false)
-		os.Exit(0)
+	err := flagSet.Parse(argSet)
+
+	if err == nil {
+		args.InputFile = flagSet.Arg(0)
+		args.OutputFile = flagSet.Arg(1)
 	}
 
-	if len(flag.Args()) < 1 {
-		print("No input supplied.")
-		printUsage(true)
-		os.Exit(0)
-	}
-
-	if !args.Encode && !decode {
-		print("Must specify --encode or --decode. See --help for options usage.")
-		os.Exit(1)
-	}
-
-	if args.Encode && decode {
-		print("Error: both --encode and --decode used.")
-		os.Exit(1)
-	}
-
-	if pitch != "" {
-		pitchValue, err := parsePitch(pitch)
-		if err != nil {
-			fmt.Printf("Error: invalid pitch value %s\n", pitch)
-			os.Exit(1)
-		}
-		args.Pitch = pitchValue
-	}
-
-	return args
+	return args, err
 }
 
-// ---------------------------------------------------------------------------------------
-func main() {
-	args := parseArgs()
+func parseCodecOpt(opt string) (string, string) {
+	key, value, found := strings.Cut(opt, "=")
+	key = strings.TrimSpace(key)
+	key = strings.ToLower(key)
 
-	inputFile := flag.Arg(0)
-	outputFile := flag.Arg(1)
+	if !found {
+		value = "1"
+	} else {
+		value = strings.TrimSpace(value)
+	}
 
-	if outputFile == "" {
+	return key, value
+}
+
+func run(cliArgs []string) returnCode {
+	args, argsErr := parseArgs(cliArgs)
+
+	if args.Help || errors.Is(argsErr, flag.ErrHelp) {
+		printUsage(false)
+		return 0
+	}
+
+	if argsErr != nil {
+		fmt.Printf("Error: %v\n", argsErr)
+	}
+
+	if args.InputFile == "" {
+		fmt.Println("No input supplied.")
+		printUsage(true)
+		return 0
+	}
+
+	if !args.Encode && !args.Decode {
+		fmt.Println("Error: Must specify --encode or --decode. See --help for options usage.")
+		return 1
+	}
+
+	if args.Encode && args.Decode {
+		fmt.Println("Error: both --encode and --decode used.")
+		return 1
+	}
+
+	if args.OutputFile == "" {
 		if args.Encode {
-			outputFile = inputFile + ".brr"
+			args.OutputFile = args.InputFile + ".brr"
 		} else {
-			outputFile = inputFile + ".wav"
+			args.OutputFile = args.InputFile + ".wav"
 		}
 
-		if _, err := os.Stat(outputFile); err == nil {
-			fmt.Printf("Error: output file %s already exists.\n", outputFile)
-			os.Exit(1)
+		if _, err := os.Stat(args.OutputFile); err == nil {
+			fmt.Printf("Error: output file %s already exists.\n", args.OutputFile)
+			return 1
 		}
 	}
 
-	codec := brr.NewBrrCodec()
+	codec := brr.NewCodec()
 
-	if args.Pitch != 0 {
-		codec.SetPitch(args.Pitch)
+	if args.Codec != "" {
+		err := codec.SetCodecImplementation(args.Codec)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return 1
+		}
 	}
 
-	if args.Gauss {
-		codec.SetGaussEnabled(true)
+	if args.Loop >= 0 {
+		codec.SetLoop(args.Loop)
 	}
 
-	if args.LoopStart >= 0 {
-		codec.SetLoop(args.LoopStart)
+	for _, opt := range args.Opts {
+		key, value := parseCodecOpt(opt)
+		if err := codec.SetCodecOption(key, value); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return 1
+		}
 	}
 
 	if args.Encode {
-		if err := codec.ReadWavFile(inputFile); err != nil {
+		if err := codec.ReadWavFile(args.InputFile); err != nil {
 			fmt.Printf("Error loading input. %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 
 		codec.Encode()
-		if err := codec.WriteBrrFile(outputFile); err != nil {
+
+		if err := codec.WriteBrrFile(args.OutputFile); err != nil {
 			fmt.Printf("Error creating output file. %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 	} else {
-		if err := codec.ReadBrrFile(inputFile); err != nil {
+		if err := codec.ReadBrrFile(args.InputFile); err != nil {
 			fmt.Printf("Error loading input file. %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 
 		codec.Decode()
 
-		if err := codec.WriteWavFile(outputFile); err != nil {
+		if err := codec.WriteWavFile(args.OutputFile); err != nil {
 			fmt.Printf("Error writing output. %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 	}
+
+	return 0
+}
+
+func main() {
+	os.Exit(run(os.Args[1:]))
 }
