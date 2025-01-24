@@ -1,6 +1,6 @@
-module go.mukunda.com/snesbrr
+module go.mukunda.com/snesbrr/v2
 
-go 1.18
+go 1.20
 
 require (
 	github.com/go-audio/audio v1.0.0

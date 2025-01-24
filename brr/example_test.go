@@ -7,7 +7,7 @@ package brr_test
 import (
 	"fmt"
 
-	"go.mukunda.com/snesbrr/brr"
+	"go.mukunda.com/snesbrr/v2/brr"
 )
 
 func ExampleBrrCodec_Encode() {

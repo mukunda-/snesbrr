@@ -20,7 +20,7 @@ import (
 	"os"
 	"strings"
 
-	"go.mukunda.com/snesbrr/brr"
+	"go.mukunda.com/snesbrr/v2/brr"
 )
 
 type returnCode = int
